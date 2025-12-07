@@ -7,6 +7,7 @@ use Exception;
 use Socket;
 use stdClass;
 use Throwable;
+use App\Services\Monitoring\Performance;
 use App\Services\Server\ServerAbstract;
 
 class Server extends ServerAbstract
@@ -75,6 +76,9 @@ class Server extends ServerAbstract
      */
     public function accept(Closure $handler): void
     {
+        // Запускаем таймер для измерения производительности
+        Performance::startTimer('server.accept');
+        
         $this->create();
         $this->reuse();
         $this->bind();
@@ -83,6 +87,11 @@ class Server extends ServerAbstract
         set_time_limit(0);
 
         $this->gracefulShutdown();
+        
+        // Настраиваем периодическое логирование метрик
+        register_shutdown_function(function () {
+            Performance::logMetrics();
+        });
 
         try {
             $this->read($handler);
@@ -100,11 +109,18 @@ class Server extends ServerAbstract
     protected function read(Closure $handler): void
     {
         do {
-            usleep(1000);
+            // Увеличиваем время сна для снижения нагрузки на CPU
+            usleep(10000); // 10ms вместо 1ms
 
             $this->clientFilter();
 
             $sockets = $this->clientSockets();
+            
+            // Если нет активных сокетов, увеличиваем время ожидания
+            if (empty($sockets)) {
+                usleep(50000); // 50ms
+                continue;
+            }
 
             if ($this->select($sockets) === 0) {
                 continue;
@@ -131,7 +147,9 @@ class Server extends ServerAbstract
 
         array_push($sockets, $this->socket);
 
-        return intval(socket_select($sockets, $write, $except, null));
+        // Добавляем таймаут для socket_select вместо null (бесконечного ожидания)
+        // Это позволит периодически проверять состояние системы
+        return intval(socket_select($sockets, $write, $except, 1, 0)); // Таймаут 1 секунда
     }
 
     /**
@@ -168,9 +186,13 @@ class Server extends ServerAbstract
      */
     protected function clientRead(Socket $socket, Closure $handler): void
     {
+        // Запускаем таймер для измерения производительности
+        Performance::startTimer('server.clientRead');
+        
         $client = $this->clientBySocket($socket);
 
         if ($client === null) {
+            Performance::endTimer('server.clientRead');
             return;
         }
 
@@ -179,6 +201,9 @@ class Server extends ServerAbstract
         if ($response === false) {
             $this->close($client->socket);
         }
+        
+        // Завершаем измерение и сохраняем метрику
+        Performance::endTimer('server.clientRead');
     }
 
     /**
@@ -238,27 +263,45 @@ class Server extends ServerAbstract
     }
 
     /**
+     * Очистка неактивных соединений
+     * 
      * @return void
      */
     protected function clientFilter(): void
     {
+        $currentTime = time();
+        $timeout = static::SOCKET_TIMEOUT;
+        $filtered = false;
+        
+        // Оптимизированная обработка клиентов
         foreach ($this->clients as &$client) {
+            // Проверка на пустой сокет
             if (empty($client->socket)) {
                 $client = null;
-
+                $filtered = true;
+                
                 continue;
             }
-
-            if ((time() - $client->timestamp) < static::SOCKET_TIMEOUT) {
-                continue;
+            
+            // Проверка таймаута
+            if (($currentTime - $client->timestamp) >= $timeout) {
+                // Логируем закрытие соединения по таймауту
+                logger()->info('Connection timeout', [
+                    'port' => $this->port,
+                    'timeout' => $timeout,
+                    'inactive_time' => $currentTime - $client->timestamp
+                ]);
+                
+                $this->close($client->socket);
+                $client = null;
+                $filtered = true;
             }
-
-            $this->close($client->socket);
-
-            $client = null;
         }
-
-        $this->clients = array_filter($this->clients);
+        
+        // Фильтруем массив только если были изменения
+        if ($filtered) {
+            $this->clients = array_filter($this->clients);
+        }
     }
 
     /**
@@ -322,7 +365,24 @@ class Server extends ServerAbstract
     protected function error(Throwable $e): void
     {
         if ($this->errorIsReportable($e)) {
+            // Добавляем более подробное логирование
+            $context = [
+                'port' => $this->port,
+                'socket_type' => $this->socketType,
+                'socket_protocol' => $this->socketProtocol,
+                'clients_count' => count($this->clients),
+                'exception' => [
+                    'message' => $e->getMessage(),
+                    'code' => $e->getCode(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ],
+            ];
+            
             report($e);
+            
+            // Добавляем запись в лог с контекстом
+            logger()->error('Socket server error: ' . $e->getMessage(), $context);
         }
     }
 

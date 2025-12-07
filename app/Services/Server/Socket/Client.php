@@ -7,6 +7,7 @@ use Socket;
 use stdClass;
 use Throwable;
 use App\Domains\DeviceMessage\Model\DeviceMessage as DeviceMessageModel;
+use App\Services\Monitoring\Performance;
 use App\Services\Protocol\Resource\ResourceAbstract;
 
 class Client
@@ -30,30 +31,43 @@ class Client
     }
 
     /**
+     * Обработка данных от клиента
+     * 
      * @return bool
      */
     public function handle(): bool
     {
+        // Запускаем таймер для измерения производительности
+        Performance::startTimer('client.handle');
+        
         $buffer = $this->readBuffer();
 
         if ($buffer === null) {
+            Performance::endTimer('client.handle');
             return false;
         }
 
         if (empty($buffer)) {
+            Performance::endTimer('client.handle');
             return true;
         }
 
+        Performance::startTimer('client.readHandle');
         $resources = $this->readHandle($buffer);
+        Performance::endTimer('client.readHandle');
 
         if (empty($resources)) {
+            Performance::endTimer('client.handle');
             return (bool)$this->writeEmpty();
         }
 
         foreach ($resources as $resource) {
+            Performance::startTimer('client.readResource');
             $this->readResource($resource);
+            Performance::endTimer('client.readResource');
         }
 
+        Performance::endTimer('client.handle');
         return true;
     }
 
@@ -159,15 +173,17 @@ class Client
 
     /**
      * @param \App\Services\Protocol\Resource\ResourceAbstract $resource
-     *
+     * 
      * @return void
      */
     protected function readResourceMessagesWrite(ResourceAbstract $resource): void
     {
+        // Ограничиваем количество сообщений для обработки за один раз
         DeviceMessageModel::query()
             ->byDeviceSerial($resource->serial())
             ->whereSentAt(false)
             ->withDevice()
+            ->limit(10) // Обрабатываем не более 10 сообщений за раз
             ->get()
             ->each($this->readResourceMessageWrite(...));
     }

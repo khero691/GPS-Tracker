@@ -174,15 +174,24 @@ class Location extends ParserAbstract
     }
 
     /**
+     * Получение часового пояса на основе координат
+     * 
      * @return ?string
      */
     protected function timezone(): ?string
     {
-        return $this->cache[__FUNCTION__] ??= helper()->latitudeLongitudeTimezone(
-            $this->latitude(),
-            $this->longitude(),
-            $this->country()
-        );
+        // Если значение уже есть в кэше, возвращаем его
+        if (isset($this->cache[__FUNCTION__])) {
+            return $this->cache[__FUNCTION__];
+        }
+        
+        // Получаем заранее все необходимые данные для минимизации вызовов
+        $latitude = $this->latitude();
+        $longitude = $this->longitude();
+        $country = $this->country();
+        
+        // Кэшируем результат
+        return $this->cache[__FUNCTION__] = helper()->latitudeLongitudeTimezone($latitude, $longitude, $country);
     }
 
     /**
